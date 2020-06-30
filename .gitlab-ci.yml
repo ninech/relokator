@@ -1,0 +1,3 @@
+include:
+  - project: 'gcp/meta'
+    file: '/go-apps-ci.yaml'
