@@ -54,27 +54,6 @@ Relokator is written in a way that allows it to be stopped and restarted flexibl
 This means if Relokator encounters an error, it is possible to retry by running
 the same command again.
 
-```
-Usage of relokator:
-  -all-namespaces
-        migrate all namespaces
-  -in-cluster-config
-        Clientset will be generated through the inClusterConfig
-  -kubeconfig string
-        (optional) absolute path to the kubeconfig file (default "$HOME/.kube/config")
-  -loglevel string
-        specify the log level. valid options are: "debug", "info", "error" (default "info")
-  -namespace string
-        select a specific namespace to migrate. If -pvc is not set, it will migrate every PVC in that namespace.
-  -pvc string
-        select a specific PVC to migrate. -namespace must be set too
-  -source-class string
-        the storageClass of the PVCs to migrate (default "nfs")
-  -target-class string
-        the storageClass of the PVCs to migrate to (default "filestore")
-  -y    answer every prompt with yes
-```
-
 ## Example Usage
 
 To migrate the PVC `app-persistent` in namespace `my-super-app` from the source
