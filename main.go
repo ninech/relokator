@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ninech/relokator/migration"
 	"github.com/op/go-logging"
-	"gitlab.nine.ch/gcp/infra/relokator/migration"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/rest"
