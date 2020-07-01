@@ -26,22 +26,58 @@ var (
 // CreateJob creates a Job and returns it after the server has processed it. It does not fail if the
 // Job already exists, but grabs the already existing one.
 func (k *kubernetesClient) CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, error) {
-	_, err := k.c.BatchV1().Jobs(job.Namespace).Create(ctx, job, createOpts)
+	job, err := k.c.BatchV1().Jobs(job.Namespace).Create(ctx, job, createOpts)
 	if err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return nil, errors.Wrapf(err, "could not create Job")
 		}
 	}
 
-	return k.c.BatchV1().Jobs(job.Namespace).Get(ctx, job.Name, metav1.GetOptions{})
+	job, err = k.c.BatchV1().Jobs(job.Namespace).Get(ctx, job.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return job, nil
 }
 
 func (k *kubernetesClient) GetJob(ctx context.Context, name, namespace string) (*batchv1.Job, error) {
-	return k.c.BatchV1().Jobs(namespace).Get(ctx, name, getOpts)
+	job, err := k.c.BatchV1().Jobs(namespace).Get(ctx, name, getOpts)
+	if err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+func (k *kubernetesClient) DeleteJob(ctx context.Context, name, namespace string) error {
+	err := k.c.BatchV1().Jobs(namespace).Delete(ctx, name, deleteOpts)
+	if err != nil && apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func (k *kubernetesClient) ListPods(ctx context.Context, namespace string) ([]corev1.Pod, error) {
+	p, err := k.c.CoreV1().Pods(namespace).List(ctx, listOpts)
+	if err != nil {
+		return nil, err
+	}
+	return p.Items, nil
+}
+
+func (k *kubernetesClient) DeletePod(ctx context.Context, name, namespace string) error {
+	err := k.c.CoreV1().Pods(namespace).Delete(ctx, name, deleteOpts)
+	if err != nil && apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func (k *kubernetesClient) GetPV(ctx context.Context, name string) (*corev1.PersistentVolume, error) {
-	return k.c.CoreV1().PersistentVolumes().Get(ctx, name, getOpts)
+	pv, err := k.c.CoreV1().PersistentVolumes().Get(ctx, name, getOpts)
+	if err != nil {
+		return nil, err
+	}
+	return pv, nil
 }
 
 func (k *kubernetesClient) UpdatePV(ctx context.Context, pv *corev1.PersistentVolume,
@@ -55,9 +91,18 @@ func (k *kubernetesClient) UpdatePV(ctx context.Context, pv *corev1.PersistentVo
 	updateFunc(pv)
 
 	for {
-		pv, err := k.c.CoreV1().PersistentVolumes().Update(ctx, pv, updateOpts)
-		if err == nil || !apierrors.IsConflict(err) {
-			return pv, err
+		updatedPV, err := k.c.CoreV1().PersistentVolumes().Update(ctx, pv, updateOpts)
+		if err == nil {
+			return updatedPV, nil
+		}
+		if !apierrors.IsConflict(err) {
+			return nil, err
+		}
+		log.Debugf("got a conflict, retrying...")
+
+		pv, err = k.c.CoreV1().PersistentVolumes().Get(ctx, pv.Name, getOpts)
+		if err != nil {
+			return nil, err
 		}
 
 		updateFunc(pv)
@@ -67,30 +112,45 @@ func (k *kubernetesClient) UpdatePV(ctx context.Context, pv *corev1.PersistentVo
 // CreatePVC creates a PVC and returns it after the server has processed it. It does not fail if the
 // PVC already exists, but grabs the already existing one.
 func (k *kubernetesClient) CreatePVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (*corev1.PersistentVolumeClaim, error) {
-	_, err := k.c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, createOpts)
+	pvc, err := k.c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, createOpts)
 	if err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return nil, errors.Wrapf(err, "could not create PVC")
 		}
 	}
 
-	return k.c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
+	pvc, err = k.c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	return pvc, nil
 }
 
 func (k *kubernetesClient) GetPVC(ctx context.Context, name, namespace string) (*corev1.PersistentVolumeClaim, error) {
-	return k.c.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, getOpts)
+	pvc, err := k.c.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, getOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	return pvc, nil
 }
 
 func (k *kubernetesClient) ListPVCs(ctx context.Context, namespace string) ([]corev1.PersistentVolumeClaim, error) {
 	p, err := k.c.CoreV1().PersistentVolumeClaims(namespace).List(ctx, listOpts)
-	return p.Items, err
+	if err != nil {
+		return nil, err
+	}
+
+	return p.Items, nil
 }
 
 func (k *kubernetesClient) DeletePVC(ctx context.Context, name, namespace string) error {
 	return k.c.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, name, deleteOpts)
 }
 
-func (k *kubernetesClient) UpdatePVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim,
+func (k *kubernetesClient) UpdatePVC(ctx context.Context,
+	pvc *corev1.PersistentVolumeClaim,
 	updateFunc func(*corev1.PersistentVolumeClaim),
 ) (*corev1.PersistentVolumeClaim, error) {
 	pvc, err := k.c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, getOpts)
@@ -101,9 +161,18 @@ func (k *kubernetesClient) UpdatePVC(ctx context.Context, pvc *corev1.Persistent
 	updateFunc(pvc)
 
 	for {
-		pvc, err := k.c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, pvc, updateOpts)
-		if err == nil || !apierrors.IsConflict(err) {
-			return pvc, err
+		updatedPVC, err := k.c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, pvc, updateOpts)
+		if err == nil {
+			return updatedPVC, nil
+		}
+		if !apierrors.IsConflict(err) {
+			return nil, err
+		}
+		log.Debugf("got a conflict, retrying...")
+
+		pvc, err = k.c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, getOpts)
+		if err != nil {
+			return nil, err
 		}
 
 		updateFunc(pvc)
@@ -111,12 +180,19 @@ func (k *kubernetesClient) UpdatePVC(ctx context.Context, pvc *corev1.Persistent
 }
 
 func (k *kubernetesClient) GetNamespace(ctx context.Context, name string) (*corev1.Namespace, error) {
-	return k.c.CoreV1().Namespaces().Get(ctx, name, getOpts)
+	ns, err := k.c.CoreV1().Namespaces().Get(ctx, name, getOpts)
+	if err != nil {
+		return nil, err
+	}
+	return ns, nil
 }
 
 func (k *kubernetesClient) ListNamespaces(ctx context.Context) ([]corev1.Namespace, error) {
 	n, err := k.c.CoreV1().Namespaces().List(ctx, listOpts)
-	return n.Items, err
+	if err != nil {
+		return nil, err
+	}
+	return n.Items, nil
 }
 
 func (k *kubernetesClient) UpdateNamespace(ctx context.Context, ns *corev1.Namespace,
@@ -130,10 +206,20 @@ func (k *kubernetesClient) UpdateNamespace(ctx context.Context, ns *corev1.Names
 	updateFunc(ns)
 
 	for {
-		ns, err := k.c.CoreV1().Namespaces().Update(ctx, ns, updateOpts)
-		if err == nil || !apierrors.IsConflict(err) {
-			return ns, err
+		updatedNS, err := k.c.CoreV1().Namespaces().Update(ctx, ns, updateOpts)
+		if err == nil {
+			return updatedNS, nil
 		}
+		if !apierrors.IsConflict(err) {
+			return nil, err
+		}
+		log.Debugf("got a conflict, retrying...")
+
+		ns, err = k.c.CoreV1().Namespaces().Get(ctx, ns.Name, getOpts)
+		if err != nil {
+			return nil, err
+		}
+
 		updateFunc(ns)
 	}
 }
