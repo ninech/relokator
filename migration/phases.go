@@ -71,7 +71,7 @@ func (s *state) scaleDown(ctx context.Context, client kubernetesClient) (err err
 // PVC is removed.
 func (s *state) recreatePVC(ctx context.Context, client kubernetesClient) (err error) {
 	pvc := s.sourcePVC.DeepCopy()
-	pvc.Annotations[isRenamedPVC] = pvc.Name
+	addAnnotation(pvc, isRenamedPVC, pvc.Name)
 	pvc.Name = withMigrationSuffix(pvc.Name)
 	pvc.ResourceVersion = ""
 
@@ -156,7 +156,7 @@ func (s *state) createTargetPVC(ctx context.Context, client kubernetesClient) (e
 	// clean the annotations
 	targetPVC.Annotations = make(map[string]string)
 
-	addArgoAnnotations(targetPVC.Annotations)
+	addArgoAnnotations(targetPVC)
 
 	s.targetPVC, err = client.CreatePVC(ctx, targetPVC)
 	return errors.Wrapf(err, "could not create target PVC %v", targetPVC.Name)
@@ -165,25 +165,22 @@ func (s *state) createTargetPVC(ctx context.Context, client kubernetesClient) (e
 // migrateData starts a migration Job that mounts both the renamed PVC and the new target
 // PVC and rsync's the data over. Waits until this Job completes.
 func (s *state) migrateData(ctx context.Context, client kubernetesClient) error {
-	var sourcePVC, targetPVC, namespace string
-	switch {
-	case s.targetPVC != nil:
-		targetPVC = s.targetPVC.Name
-		sourcePVC = withMigrationSuffix(s.targetPVC.Name)
-		namespace = s.targetPVC.Namespace
+	jobName := s.renamedPVC.Annotations[migrationJob]
 
-	case s.renamedPVC != nil:
-		sourcePVC = s.renamedPVC.Name
-		targetPVC = removeMigrationSuffix(s.renamedPVC.Name)
-		namespace = s.renamedPVC.Namespace
+	if jobName == "" {
+		job, err := client.CreateJob(ctx, newJob(s.renamedPVC.Name, s.targetPVC.Name, s.ns.Name))
+		if err != nil {
+			return errors.Wrapf(err, "could not create migration job")
+		}
 
-	default:
-		return errors.New("neither target PVC nor renamed PVC set, cannot start Job")
-	}
+		jobName = job.Name
 
-	job, err := client.CreateJob(ctx, newJob(sourcePVC, targetPVC, namespace))
-	if err != nil {
-		return errors.Wrapf(err, "could not create migration job")
+		s.renamedPVC, err = client.UpdatePVC(ctx, s.renamedPVC, func(pvc *corev1.PersistentVolumeClaim) {
+			addAnnotation(pvc, migrationJob, jobName)
+		})
+		if err != nil {
+			return errors.Wrapf(err, "could not annotate PVC with jobName")
+		}
 	}
 
 	tick := time.NewTicker(time.Second * 5)
@@ -194,9 +191,9 @@ func (s *state) migrateData(ctx context.Context, client kubernetesClient) error 
 		case <-tick.C:
 		case <-timeout.C:
 			return errors.New(fmt.Sprintf("timeout waiting for migration job %v to complete",
-				job.Name))
+				jobName))
 		}
-		job, err := client.GetJob(ctx, job.Name, job.Namespace)
+		job, err := client.GetJob(ctx, jobName, s.ns.Name)
 		if err != nil {
 			return errors.Wrapf(err, "could not get update for Job %v", job.Name)
 		}
@@ -245,17 +242,36 @@ func (s *state) scaleUp(ctx context.Context, client kubernetesClient) error {
 
 // cleanUp removes the renamed PVC and the annotations that we don't need anymore.
 func (s *state) cleanUp(ctx context.Context, client kubernetesClient) error {
+	jobName := s.renamedPVC.Annotations[migrationJob]
+
 	err := client.DeletePVC(ctx, s.renamedPVC.Name, s.renamedPVC.Namespace)
 	if err != nil {
 		return errors.Wrapf(err, "could not cleanup renamed PVC %v", s.renamedPVC.Name)
 	}
 	s.renamedPVC = nil
 
-	s.targetPVC, err = client.UpdatePVC(ctx, s.targetPVC, func(pvc *corev1.PersistentVolumeClaim) {
-		delete(pvc.Annotations, completedMigrationPhase)
-	})
+	pods, err := client.ListPods(ctx, s.targetPVC.Namespace)
 	if err != nil {
-		return errors.Wrapf(err, "could not update target PVC's phase annotation")
+		return errors.Wrapf(err, "could not list pods")
+	}
+
+	// delete all pods from our job (should only be one)
+	for _, pod := range pods {
+		for _, owner := range pod.OwnerReferences {
+			if owner.APIVersion == "batch/v1" &&
+				owner.Kind == "Job" &&
+				owner.Name == jobName {
+				err := client.DeletePod(ctx, pod.Name, pod.Namespace)
+				if err != nil {
+					return errors.Wrapf(err, "could not remove pod %v from job %v", pod.Name, jobName)
+				}
+			}
+		}
+	}
+
+	err = client.DeleteJob(ctx, jobName, s.targetPVC.Namespace)
+	if err != nil {
+		return errors.Wrapf(err, "could not remove migration Job")
 	}
 
 	return nil
@@ -269,20 +285,21 @@ func removeMigrationSuffix(s string) string {
 	return strings.TrimSuffix(s, migrationSuffix)
 }
 
-func addArgoAnnotations(annotations map[string]string) {
-	annotations["argocd.argoproj.io/sync-options"] = "Prune=false"
-	annotations["argocd.argoproj.io/compare-options"] = "IgnoreExtraneous"
+func addArgoAnnotations(obj metav1.Object) {
+	addAnnotation(obj, "argocd.argoproj.io/sync-options", "Prune=false")
+	addAnnotation(obj, "argocd.argoproj.io/compare-options", "IgnoreExtraneous")
 }
 
 func newJob(sourcePVC, targetPVC, namespace string) *batchv1.Job {
 	var compl int32 = 1
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "relokator-" + targetPVC,
-			Namespace: namespace,
+			GenerateName: "relokator-",
+			Namespace:    namespace,
 		},
 		Spec: batchv1.JobSpec{
-			Completions: &compl,
+			TTLSecondsAfterFinished: new(int32),
+			Completions:             &compl,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyOnFailure,

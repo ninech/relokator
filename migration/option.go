@@ -2,7 +2,6 @@ package migration
 
 import (
 	"github.com/pkg/errors"
-	corev1 "k8s.io/api/core/v1"
 )
 
 type Option func(*Migrator) error
@@ -18,12 +17,11 @@ func AutoConfirmPrompts() Option {
 // Namespace migrates only a specific namespace.
 func Namespace(ns string) Option {
 	return func(m *Migrator) error {
-		n, err := m.client.GetNamespace(m.ctx, ns)
-		if err != nil {
-			return errors.Wrapf(err, "could not get namespace %v", ns)
+		if m.state == nil {
+			m.state = make(map[string]namespaceState)
 		}
 
-		m.state[n] = nil
+		m.state[ns] = nil
 		return nil
 	}
 }
@@ -31,21 +29,16 @@ func Namespace(ns string) Option {
 // PerPersistentVolumeClaim migrates only a specific PVC in a specific namespace.
 func PersistentVolumeClaim(ns, pvc string) Option {
 	return func(m *Migrator) error {
-		n, err := m.client.GetNamespace(m.ctx, ns)
+		_ = Namespace(ns)(m)
+		if m.state[ns] == nil {
+			m.state[ns] = make(map[string]*state)
+		}
+
+		st, err := newState(m.ctx, m.client, ns, pvc)
 		if err != nil {
-			return errors.Wrapf(err, "could not get namespace %v", ns)
+			return errors.Wrapf(err, "could not create state")
 		}
-
-		p, err := m.client.GetPVC(m.ctx, pvc, ns)
-		if err != nil {
-			return errors.Wrapf(err, "could not get PVC %v", pvc)
-		}
-
-		if m.state[n] == nil {
-			m.state[n] = make(map[*corev1.PersistentVolumeClaim]*state)
-		}
-
-		m.state[n][p] = newState(n, p)
+		m.state[ns][pvc] = st
 		return nil
 	}
 }

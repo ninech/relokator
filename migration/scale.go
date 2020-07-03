@@ -44,11 +44,11 @@ func (s scaleDown) deployments(ctx context.Context, client kubernetes.Interface)
 
 			// has PVC, scale down
 			if deploy.Spec.Replicas == nil {
-				deploy.Annotations[oldReplicaCount] = "-1"
+				addAnnotation(&deploy, oldReplicaCount, "-1")
 			} else {
-				deploy.Annotations[oldReplicaCount] = strconv.Itoa(int(*deploy.Spec.Replicas))
+				addAnnotation(&deploy, oldReplicaCount, strconv.Itoa(int(*deploy.Spec.Replicas)))
 			}
-			deploy.Annotations[pvcMigration] = s.pvc
+			addAnnotation(&deploy, pvcMigration, s.pvc)
 			deploy.Spec.Replicas = new(int32) // default 0
 
 			_, err := client.AppsV1().Deployments(s.namespace).Update(ctx, &deploy, metav1.UpdateOptions{})
@@ -126,11 +126,11 @@ func (s scaleDown) statefulSets(ctx context.Context, client kubernetes.Interface
 
 			// has PVC, scale down
 			if set.Spec.Replicas == nil {
-				set.Annotations[oldReplicaCount] = "-1"
+				addAnnotation(&set, oldReplicaCount, "-1")
 			} else {
-				set.Annotations[oldReplicaCount] = strconv.Itoa(int(*set.Spec.Replicas))
+				addAnnotation(&set, oldReplicaCount, strconv.Itoa(int(*set.Spec.Replicas)))
 			}
-			set.Annotations[pvcMigration] = s.pvc
+			addAnnotation(&set, pvcMigration, s.pvc)
 			set.Spec.Replicas = new(int32) // default 0
 
 			_, err := client.AppsV1().StatefulSets(s.namespace).Update(ctx, &set, metav1.UpdateOptions{})
@@ -226,11 +226,11 @@ func (s scaleDown) replicaSets(ctx context.Context, client kubernetes.Interface)
 
 			// has PVC, scale down
 			if set.Spec.Replicas == nil {
-				set.Annotations[oldReplicaCount] = "-1"
+				addAnnotation(&set, oldReplicaCount, "-1")
 			} else {
-				set.Annotations[oldReplicaCount] = strconv.Itoa(int(*set.Spec.Replicas))
+				addAnnotation(&set, oldReplicaCount, strconv.Itoa(int(*set.Spec.Replicas)))
 			}
-			set.Annotations[pvcMigration] = s.pvc
+			addAnnotation(&set, pvcMigration, s.pvc)
 			set.Spec.Replicas = new(int32) // default 0
 
 			_, err := client.AppsV1().ReplicaSets(s.namespace).Update(ctx, &set, metav1.UpdateOptions{})
@@ -339,7 +339,7 @@ func (s scaleDown) cronJobs(ctx context.Context, client kubernetes.Interface) er
 			suspend := true
 			job.Spec.Suspend = &suspend
 			// just set something that we now we changed it
-			job.Annotations[pvcMigration] = s.pvc
+			addAnnotation(&job, pvcMigration, s.pvc)
 
 			_, err := client.BatchV1beta1().CronJobs(s.namespace).Update(ctx, &job, metav1.UpdateOptions{})
 			if err != nil {
