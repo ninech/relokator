@@ -93,18 +93,36 @@ func (s *state) recreatePVC(ctx context.Context, client kubernetesClient) (err e
 	}
 
 	log.Debugf("%v/%v: waiting for old PVC to be gone", s.ns.Name, s.sourcePVC.Name)
-	tick := time.NewTicker(time.Second * 5)
-	timeout := time.NewTimer(time.Minute * 2)
+
+	return waitUntil(func() error {
+		_, err := client.GetPVC(ctx, s.sourcePVC.Name, s.sourcePVC.Namespace)
+		if apierrors.IsNotFound(err) {
+			s.sourcePVC = nil
+			return nil
+		}
+		return errors.Errorf("PVC %v/%v still exists or other error %v", s.sourcePVC.Namespace, s.sourcePVC.Name, err)
+	}, time.Second*1, time.Minute*2)
+}
+
+// waitUntil executes event every tickTime until it either returns nil or the
+// timeoutTime has passed.
+func waitUntil(event func() error, tickTime, timeoutTime time.Duration) error {
+	if err := event(); err == nil {
+		return nil
+	}
+
+	var err error
+	tick := time.NewTicker(tickTime)
+	timeout := time.NewTimer(timeoutTime)
 	for {
 		select {
 		case <-tick.C:
 		case <-timeout.C:
-			return errors.New(fmt.Sprintf("timeout waiting for old PVC %v to be removed", s.sourcePVC.Name))
+			return errors.Wrapf(err, "timeout")
 		}
 
-		_, err := client.GetPVC(ctx, s.sourcePVC.Name, s.sourcePVC.Namespace)
-		if apierrors.IsNotFound(err) {
-			s.sourcePVC = nil
+		err = event()
+		if err == nil {
 			return nil
 		}
 	}
@@ -123,15 +141,8 @@ func (s *state) switchTargetPVC(ctx context.Context, client kubernetesClient) (e
 
 	// PV will be bound to the new (renamed) PVC, wait for this to happen.
 	log.Debug("waiting for PV target to have switched")
-	tick := time.NewTicker(time.Second * 5)
-	timeout := time.NewTimer(time.Minute * 2)
-	for {
-		select {
-		case <-tick.C:
-		case <-timeout.C:
-			return errors.New(fmt.Sprintf("timeout waiting for renamed PVC %v to be bound to old PV %v",
-				s.renamedPVC.Name, s.sourcePV.Name))
-		}
+
+	return waitUntil(func() error {
 		s.renamedPVC, err = client.GetPVC(ctx, s.renamedPVC.Name, s.renamedPVC.Namespace)
 		if err != nil {
 			return errors.Wrapf(err, "could not get update for PVC %v", s.renamedPVC.Name)
@@ -140,7 +151,8 @@ func (s *state) switchTargetPVC(ctx context.Context, client kubernetesClient) (e
 			log.Debugf("%v/%v: renamed PVC bound by old PV", s.ns.Name, s.renamedPVC.Name)
 			return nil
 		}
-	}
+		return errors.Errorf("PVC phase not correct")
+	}, time.Second*1, time.Minute*2)
 }
 
 // createTargetPVC creates the PVC. It also adds annotations so
@@ -183,19 +195,10 @@ func (s *state) migrateData(ctx context.Context, client kubernetesClient) error 
 		}
 	}
 
-	tick := time.NewTicker(time.Second * 5)
-	// this may take a while
-	timeout := time.NewTimer(time.Minute * 30)
-	for {
-		select {
-		case <-tick.C:
-		case <-timeout.C:
-			return errors.New(fmt.Sprintf("timeout waiting for migration job %v to complete",
-				jobName))
-		}
+	return waitUntil(func() error {
 		job, err := client.GetJob(ctx, jobName, s.ns.Name)
 		if err != nil {
-			return errors.Wrapf(err, "could not get update for Job %v", job.Name)
+			return errors.Wrapf(err, "could not get update for Job %v", jobName)
 		}
 
 		if job.Status.Failed != 0 {
@@ -204,7 +207,8 @@ func (s *state) migrateData(ctx context.Context, client kubernetesClient) error 
 		if job.Status.Succeeded == 1 {
 			return nil
 		}
-	}
+		return errors.Errorf("Job not finished yet")
+	}, time.Second*1, time.Minute*30)
 }
 
 // scaleUp scales up resources again, after the migration.
@@ -296,6 +300,9 @@ func newJob(sourcePVC, targetPVC, namespace string) *batchv1.Job {
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "relokator-",
 			Namespace:    namespace,
+			Annotations: map[string]string{
+				pvcMigration: targetPVC,
+			},
 		},
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: new(int32),

@@ -227,16 +227,24 @@ func (c clusterState) allPVCs(ctx context.Context, client kubernetesClient, name
 	if err != nil {
 		return errors.Wrapf(err, "could not list PVs")
 	}
+	// TODO: figure out if a PVC is in Terminating state and ignore it?
 	for _, pvc := range p {
 		if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != globalSourceClass {
 			log.Debugf("%v/%v: storageClass of PVC is %q, not %q. not migrating", namespace, pvc.Name, *pvc.Spec.StorageClassName, globalSourceClass)
 			continue
 		}
-		// TODO: figure out if a PVC is in Terminating state and ignore it
+
+		if _, ok := pvc.Annotations[completedMigrationPhase]; ok {
+			if name, ok := pvc.Annotations[isRenamedPVC]; ok {
+				// overwrite the name to the original PVC
+				pvc.Name = name
+			}
+		}
 
 		if c[namespace] == nil {
 			c[namespace] = make(namespaceState)
 		}
+
 		c[namespace][pvc.Name], err = newState(ctx, client, namespace, pvc.Name)
 		if err != nil {
 			return errors.Wrapf(err, "could not create state")
@@ -297,10 +305,10 @@ func (m *Migrator) String() string {
 	return str.String()
 }
 
+const argoAnnotation = "nine.ch/argo-admin"
+
 // toggleArgoAdmin enables or disables the admin access for argo in the specified namespace
 func (m *Migrator) toggleArgoAdmin(ns *corev1.Namespace) error {
-	const argoAnnotation = "nine.ch/argo-admin"
-
 	val, ok := ns.Annotations[argoAnnotation]
 	if !ok {
 		return nil
@@ -425,7 +433,6 @@ func (m *Migrator) namespace(ns string, nsState namespaceState) error {
 	log.Infof("starting migration in namespace %v", ns)
 
 	// grab the namespace from the first state
-	// TODO: should we embed the namespace in the namespaceState?
 	var namespace *corev1.Namespace
 	for _, st := range nsState {
 		namespace = st.ns
