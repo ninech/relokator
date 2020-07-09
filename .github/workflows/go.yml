@@ -5,6 +5,7 @@ on: [push, pull_request]
 jobs:
   test:
     name: Test
+    container: ninech/controller-test-image:latest
     runs-on: ubuntu-latest
     steps:
     - name: Set up Go 1.x
