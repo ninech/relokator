@@ -3,10 +3,12 @@ package migration
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/pkg/errors"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -109,41 +111,64 @@ func (s scaleUp) deployments(ctx context.Context, client kubernetes.Interface) e
 func (s scaleDown) statefulSets(ctx context.Context, client kubernetes.Interface) error {
 	sets, err := client.AppsV1().StatefulSets(s.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil
+		return err
 	}
+
 	for _, set := range sets.Items {
-		for _, vol := range set.Spec.Template.Spec.Volumes {
-			if vol.PersistentVolumeClaim == nil {
-				continue
-			}
-			if vol.PersistentVolumeClaim.ClaimName != s.pvc {
-				continue
-			}
-			// ensure that we have not processed it before already
-			if _, ok := set.Annotations[pvcMigration]; ok {
-				continue
-			}
-
-			// has PVC, scale down
-			if set.Spec.Replicas == nil {
-				addAnnotation(&set, oldReplicaCount, "-1")
-			} else {
-				addAnnotation(&set, oldReplicaCount, strconv.Itoa(int(*set.Spec.Replicas)))
-			}
-			addAnnotation(&set, pvcMigration, s.pvc)
-			set.Spec.Replicas = new(int32) // default 0
-
-			_, err := client.AppsV1().StatefulSets(s.namespace).Update(ctx, &set, metav1.UpdateOptions{})
-			if err != nil {
-				return errors.Wrapf(err, "could not update deployment %v", set.Name)
-			}
-
-			log.Debugf("%v/%v: scaled down statefulSet %v", s.namespace, s.pvc, set.Name)
-
-			break
+		if !s.shouldScale(set) {
+			continue
 		}
+
+		// has PVC, scale down
+		if set.Spec.Replicas == nil {
+			addAnnotation(&set, oldReplicaCount, "-1")
+		} else {
+			addAnnotation(&set, oldReplicaCount, strconv.Itoa(int(*set.Spec.Replicas)))
+		}
+		addAnnotation(&set, pvcMigration, s.pvc)
+		set.Spec.Replicas = new(int32) // default 0
+
+		_, err := client.AppsV1().StatefulSets(s.namespace).Update(ctx, &set, metav1.UpdateOptions{})
+		if err != nil {
+			return errors.Wrapf(err, "could not update statefulSet %v", set.Name)
+		}
+
+		log.Debugf("%v/%v: scaled down statefulSet %v", s.namespace, s.pvc, set.Name)
 	}
 	return nil
+}
+
+func (s scaleDown) shouldScale(set appsv1.StatefulSet) bool {
+	// ensure that we have not processed it before already
+	if _, ok := set.Annotations[pvcMigration]; ok {
+		return false
+	}
+
+	for _, vol := range set.Spec.VolumeClaimTemplates {
+		// volumes created by a volumeClaimTemplate are named volName-stsName-num.
+		// in order to find out if our pvc has been created by this sts,
+		// we use this regexp.
+		match, err := regexp.MatchString(fmt.Sprintf("(%s-%s-)[0-9]+", vol.ObjectMeta.Name, set.Name), s.pvc)
+		if err != nil {
+			return false
+		}
+
+		if match {
+			return true
+		}
+	}
+
+	for _, vol := range set.Spec.Template.Spec.Volumes {
+		if vol.PersistentVolumeClaim == nil {
+			continue
+		}
+
+		if vol.PersistentVolumeClaim.ClaimName == s.pvc {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s scaleUp) statefulSets(ctx context.Context, client kubernetes.Interface) error {
@@ -183,7 +208,7 @@ func (s scaleUp) statefulSets(ctx context.Context, client kubernetes.Interface) 
 		if _, err := client.AppsV1().StatefulSets(set.Namespace).Update(ctx, &set, metav1.UpdateOptions{}); err != nil {
 			return errors.Wrapf(err, "could not scale up statefulset %v", set.Name)
 		}
-		log.Debugf("%v/%v: scaled up statefulset %v to %v replicas", s.namespace, s.pvc, set.Name, replicas)
+		log.Debugf("%v/%v: scaled up statefulset %v to %v replicas", s.namespace, s.pvc.Name, set.Name, replicas)
 	}
 	return nil
 }
