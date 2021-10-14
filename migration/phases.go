@@ -305,7 +305,6 @@ func newJob(sourcePVC, targetPVC, namespace string) *batchv1.Job {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: new(int32),
 			Completions:             &compl,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
